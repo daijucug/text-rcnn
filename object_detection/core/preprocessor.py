@@ -604,6 +604,7 @@ def _strict_random_crop_image(image,
                               labels,
                               masks=None,
                               keypoints=None,
+                              transcriptions=None,
                               min_object_covered=1.0,
                               aspect_ratio_range=(0.75, 1.33),
                               area_range=(0.1, 1.0),
@@ -723,6 +724,12 @@ def _strict_random_crop_image(image,
                                                         [0.0, 0.0, 1.0, 1.0])
       result.append(new_keypoints)
 
+    if transcriptions is not None:
+      transcriptions_inside_window = tf.gather(transcriptions, inside_window_ids)
+      transcriptions_completely_inside_window = tf.gather(
+          transcriptions_inside_window, keep_ids)
+      result.append(transcriptions_completely_inside_window)
+
     return tuple(result)
 
 
@@ -731,6 +738,7 @@ def random_crop_image(image,
                       labels,
                       masks=None,
                       keypoints=None,
+                      transcriptions = None,
                       min_object_covered=1.0,
                       aspect_ratio_range=(0.75, 1.33),
                       area_range=(0.1, 1.0),
@@ -801,6 +809,7 @@ def random_crop_image(image,
         labels,
         masks=masks,
         keypoints=keypoints,
+        transcriptions=transcriptions,
         min_object_covered=min_object_covered,
         aspect_ratio_range=aspect_ratio_range,
         area_range=area_range,
@@ -818,6 +827,8 @@ def random_crop_image(image,
       outputs.append(masks)
     if keypoints is not None:
       outputs.append(keypoints)
+    if transcriptions is not None:
+      outputs.append(transcriptions)
 
     result = tf.cond(do_a_crop_random,
                      strict_random_crop_image_fn,
@@ -1748,7 +1759,8 @@ def ssd_random_crop_fixed_aspect_ratio(
 
 
 def get_default_func_arg_map(include_instance_masks=False,
-                             include_keypoints=False):
+                             include_keypoints=False,
+                             include_transcriptions=False):
   """Returns the default mapping from a preprocessor function to its args.
 
   Args:
@@ -1789,7 +1801,8 @@ def get_default_func_arg_map(include_instance_masks=False,
                           fields.InputDataFields.groundtruth_boxes,
                           fields.InputDataFields.groundtruth_classes,
                           groundtruth_instance_masks,
-                          groundtruth_keypoints,),
+                          groundtruth_keypoints,
+                          fields.InputDataFields.groundtruth_texts),
       random_pad_image: (fields.InputDataFields.image,
                          fields.InputDataFields.groundtruth_boxes),
       random_crop_pad_image: (fields.InputDataFields.image,

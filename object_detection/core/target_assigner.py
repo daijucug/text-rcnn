@@ -93,7 +93,7 @@ class TargetAssigner(object):
   def box_coder(self):
     return self._box_coder
 
-  def assign(self, anchors, groundtruth_boxes, groundtruth_labels=None,
+  def assign(self, anchors, groundtruth_boxes, groundtruth_labels=None, groundtruth_transcriptions=None, 
              **params):
     """Assign classification and regression targets to each anchor.
 
@@ -140,6 +140,10 @@ class TargetAssigner(object):
       groundtruth_labels = tf.ones(tf.expand_dims(groundtruth_boxes.num_boxes(),
                                                   0))
       groundtruth_labels = tf.expand_dims(groundtruth_labels, -1)
+
+    if groundtruth_transcriptions is None:
+      groundtruth_transcriptions = tf.tile(tf.constant([[0] * 16], dtype=tf.uint8), [groundtruth_boxes.num_boxes(), 1])
+
     shape_assert = tf.assert_equal(tf.shape(groundtruth_labels)[1:],
                                    tf.shape(self._unmatched_cls_target))
 
@@ -151,7 +155,9 @@ class TargetAssigner(object):
                                                     groundtruth_boxes,
                                                     match)
       cls_targets = self._create_classification_targets(groundtruth_labels,
-                                                        match)
+                                                        match, self._unmatched_cls_target)
+      trs_targets = self._create_classification_targets(groundtruth_transcriptions,
+                                                        match, tf.constant([0] * 16, dtype=tf.uint8))
       reg_weights = self._create_regression_weights(match)
       cls_weights = self._create_classification_weights(
           match, self._positive_class_weight, self._negative_class_weight)
@@ -160,10 +166,11 @@ class TargetAssigner(object):
       if num_anchors is not None:
         reg_targets = self._reset_target_shape(reg_targets, num_anchors)
         cls_targets = self._reset_target_shape(cls_targets, num_anchors)
+        trs_targets = self._reset_target_shape(trs_targets, num_anchors)
         reg_weights = self._reset_target_shape(reg_weights, num_anchors)
         cls_weights = self._reset_target_shape(cls_weights, num_anchors)
 
-    return cls_targets, cls_weights, reg_targets, reg_weights, match
+    return cls_targets, cls_weights, trs_targets, reg_targets, reg_weights, match
 
   def _reset_target_shape(self, target, num_anchors):
     """Sets the static shape of the target.
@@ -224,7 +231,7 @@ class TargetAssigner(object):
     """
     return tf.constant([self._box_coder.code_size*[0]], tf.float32)
 
-  def _create_classification_targets(self, groundtruth_labels, match):
+  def _create_classification_targets(self, groundtruth_labels, match, unmatched_cls_target):
     """Create classification targets for each anchor.
 
     Assign a classification target of for each anchor to the matching
@@ -249,9 +256,9 @@ class TargetAssigner(object):
     matched_gt_indices = match.matched_row_indices()
     matched_cls_targets = tf.gather(groundtruth_labels, matched_gt_indices)
 
-    ones = self._unmatched_cls_target.shape.ndims * [1]
+    ones = unmatched_cls_target.shape.ndims * [1]
     unmatched_ignored_cls_targets = tf.tile(
-        tf.expand_dims(self._unmatched_cls_target, 0),
+        tf.expand_dims(unmatched_cls_target, 0),
         tf.stack([tf.size(unmatched_ignored_anchor_indices)] + ones))
 
     cls_targets = tf.dynamic_stitch(
@@ -433,7 +440,7 @@ def batch_assign_targets(target_assigner,
   match_list = []
   for anchors, gt_boxes, gt_class_targets in zip(
       anchors_batch, gt_box_batch, gt_class_targets_batch):
-    (cls_targets, cls_weights, reg_targets,
+    (cls_targets, cls_weights, trs_targets, reg_targets,
      reg_weights, match) = target_assigner.assign(
          anchors, gt_boxes, gt_class_targets)
     cls_targets_list.append(cls_targets)

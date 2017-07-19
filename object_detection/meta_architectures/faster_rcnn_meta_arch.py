@@ -68,6 +68,7 @@ TODO: Support TPU implementations and sigmoid loss.
 from abc import abstractmethod
 from functools import partial
 import tensorflow as tf
+import sys
 
 from object_detection.anchor_generators import grid_anchor_generator
 from object_detection.core import balanced_positive_negative_sampler as sampler
@@ -551,7 +552,72 @@ class FasterRCNNMetaArch(model.DetectionModel):
           rpn_objectness_predictions_with_background,
           rpn_features_to_crop,
           anchors, image_shape))
+
+
     return prediction_dict
+
+
+  def _predict_transcriptions(self, flattened_proposal_feature_maps,
+                              proposal_groundtruth_transcriptions,
+                              rpn_features_to_crop,
+                              anchors,
+                              image_shape):
+  
+    batch_size,h,w,d = [x.value for x in flattened_proposal_feature_maps.get_shape().dims]
+    features = tf.reshape(flattened_proposal_feature_maps, [batch_size, h*w, d])
+
+    print ''
+    print 'predict transcriptions'
+    print rpn_features_to_crop
+    print proposal_groundtruth_transcriptions
+    print flattened_proposal_feature_maps
+    sys.stdout.flush()
+
+
+    num_char_classes = 128
+    seq_length = 16
+    num_lstm_units = 256
+    weight_decay = 0.00004
+    zero_label = tf.zeros([batch_size, num_char_classes])
+    softmax_w = slim.model_variable('softmax_w', [num_lstm_units, num_char_classes], initializer=tf.orthogonal_initializer(), regularizer=slim.l2_regularizer(weight_decay))
+    softmax_b = slim.model_variable('softmax_b', [num_char_classes], initializer=tf.zeros_initializer(), regularizer=slim.l2_regularizer(weight_decay))
+
+    proposal_groundtruth_transcriptions = self._flatten_first_two_dimensions(proposal_groundtruth_transcriptions)
+    #proposal_groundtruth_transcriptions = tf.Print(proposal_groundtruth_transcriptions,[proposal_groundtruth_transcriptions], summarize=10000)
+    if self._is_training:
+      proposal_groundtruth_transcriptions_one_hot = slim.one_hot_encoding(proposal_groundtruth_transcriptions, num_char_classes)
+
+    print batch_size
+    print zero_label
+    print softmax_w
+    print softmax_b
+    sys.stdout.flush()
+
+    def get_input(prev, i):
+      if i == 0:
+        return zero_label
+      if self._is_training:
+        return proposal_groundtruth_transcriptions_one_hot[:, i - 1, :]
+      else:
+        logits = tf.nn.xw_plus_b(prev, softmax_w, softmax_b)
+        prediction = tf.argmax(logits, dimension=1)
+        return slim.one_hot_encoding(prediction, num_char_classes)
+
+    with tf.variable_scope('LSTM'):
+      lstm_cell = tf.contrib.rnn.LSTMCell(num_lstm_units, cell_clip=10.0, initializer=tf.orthogonal_initializer())
+      lstm_outputs, _ = tf.contrib.legacy_seq2seq.attention_decoder(
+          decoder_inputs=[zero_label] + [None] * (seq_length - 1),
+          initial_state=lstm_cell.zero_state(batch_size, tf.float32),
+          attention_states=features,
+          cell=lstm_cell,
+          loop_function=get_input)
+
+    with tf.variable_scope('logits'):
+      logits_list = [ tf.expand_dims(tf.nn.xw_plus_b(lstm_output, softmax_w, softmax_b), dim=1) for lstm_output in lstm_outputs ]
+    logits = tf.concat(logits_list, 1)
+
+    return {'transcriptions_logits': logits, 'transcriptions': tf.argmax(logits, 2), 'transcriptions_groundtruth': proposal_groundtruth_transcriptions}
+
 
   def _predict_second_stage(self, rpn_box_encodings,
                             rpn_objectness_predictions_with_background,
@@ -599,13 +665,21 @@ class FasterRCNNMetaArch(model.DetectionModel):
           [total_num_padded_proposals, num_classes, mask_height, mask_width]
           containing instance mask predictions.
     """
-    proposal_boxes_normalized, _, num_proposals = self._postprocess_rpn(
+    proposal_boxes_normalized, _, proposal_groundtruth_transcriptions, num_proposals = self._postprocess_rpn(
         rpn_box_encodings, rpn_objectness_predictions_with_background,
         anchors, image_shape)
 
     flattened_proposal_feature_maps = (
         self._compute_second_stage_input_feature_maps(
             rpn_features_to_crop, proposal_boxes_normalized))
+
+    prediction_dict = {}
+    if True: 
+      prediction_dict.update(self._predict_transcriptions(
+          flattened_proposal_feature_maps,
+          proposal_groundtruth_transcriptions,
+          rpn_features_to_crop,
+          anchors, image_shape))
 
     box_classifier_features = (
         self._feature_extractor.extract_box_classifier_features(
@@ -624,13 +698,14 @@ class FasterRCNNMetaArch(model.DetectionModel):
     absolute_proposal_boxes = ops.normalized_to_image_coordinates(
         proposal_boxes_normalized, image_shape, self._parallel_iterations)
 
-    prediction_dict = {
+    prediction_dict.update({
         'refined_box_encodings': refined_box_encodings,
         'class_predictions_with_background':
         class_predictions_with_background,
         'num_proposals': num_proposals,
         'proposal_boxes': absolute_proposal_boxes,
-    }
+    })
+
     return prediction_dict
 
   def _extract_rpn_feature_maps(self, preprocessed_inputs):
@@ -813,15 +888,16 @@ class FasterRCNNMetaArch(model.DetectionModel):
     """
     with tf.name_scope('FirstStagePostprocessor'):
       image_shape = prediction_dict['image_shape']
+      proposal_boxes, proposal_scores, proposal_groundtruth_transcriptions, num_proposals = self._postprocess_rpn(
+          prediction_dict['rpn_box_encodings'],
+          prediction_dict['rpn_objectness_predictions_with_background'],
+          prediction_dict['anchors'],
+          image_shape)
       if self._first_stage_only:
-        proposal_boxes, proposal_scores, num_proposals = self._postprocess_rpn(
-            prediction_dict['rpn_box_encodings'],
-            prediction_dict['rpn_objectness_predictions_with_background'],
-            prediction_dict['anchors'],
-            image_shape)
         return {
             'detection_boxes': proposal_boxes,
             'detection_scores': proposal_scores,
+            'detection_transcriptions': tf.expand_dims(prediction_dict['transcriptions'], 0),
             'num_detections': num_proposals
         }
     with tf.name_scope('SecondStagePostprocessor'):
@@ -832,7 +908,8 @@ class FasterRCNNMetaArch(model.DetectionModel):
           prediction_dict['proposal_boxes'],
           prediction_dict['num_proposals'],
           image_shape,
-          mask_predictions=mask_predictions)
+          mask_predictions=mask_predictions,
+          transcriptions=prediction_dict['transcriptions'])
       return detections_dict
 
   def _postprocess_rpn(self,
@@ -879,9 +956,11 @@ class FasterRCNNMetaArch(model.DetectionModel):
     if self._is_training:
       (groundtruth_boxlists, groundtruth_classes_with_background_list
       ) = self._format_groundtruth_data(image_shape)
+      groundtruth_transcriptions = self._groundtruth_lists[fields.BoxListFields.transcriptions]
 
     proposal_boxes_list = []
     proposal_scores_list = []
+    proposal_groundtruth_transcriptions = []
     num_proposals_list = []
     for (batch_index,
          (rpn_box_encodings,
@@ -904,7 +983,8 @@ class FasterRCNNMetaArch(model.DetectionModel):
         if not self._hard_example_miner:
           proposal_boxlist = self._sample_box_classifier_minibatch(
               proposal_boxlist, groundtruth_boxlists[batch_index],
-              groundtruth_classes_with_background_list[batch_index])
+              groundtruth_classes_with_background_list[batch_index], 
+              groundtruth_transcriptions[batch_index])
 
       normalized_proposals = box_list_ops.to_normalized_coordinates(
           proposal_boxlist, image_shape[1], image_shape[2],
@@ -916,10 +996,19 @@ class FasterRCNNMetaArch(model.DetectionModel):
       proposal_boxes_list.append(padded_proposals.get())
       proposal_scores_list.append(
           padded_proposals.get_field(fields.BoxListFields.scores))
+
+      print ''
+      print '_postprocess_rpn'
+      print 'iter', batch_index
+      print padded_proposals.get_field('groundtruth_transcriptions')
+      sys.stdout.flush()
+
+      proposal_groundtruth_transcriptions.append(padded_proposals.get_field('groundtruth_transcriptions'))
+
       num_proposals_list.append(tf.minimum(normalized_proposals.num_boxes(),
                                            self.max_num_proposals))
 
-    return (tf.stack(proposal_boxes_list), tf.stack(proposal_scores_list),
+    return (tf.stack(proposal_boxes_list), tf.stack(proposal_scores_list), tf.stack(proposal_groundtruth_transcriptions), 
             tf.stack(num_proposals_list))
 
   def _format_groundtruth_data(self, image_shape):
@@ -957,7 +1046,8 @@ class FasterRCNNMetaArch(model.DetectionModel):
   def _sample_box_classifier_minibatch(self,
                                        proposal_boxlist,
                                        groundtruth_boxlist,
-                                       groundtruth_classes_with_background):
+                                       groundtruth_classes_with_background, 
+                                       groundtruth_transcriptions):
     """Samples a mini-batch of proposals to be sent to the box classifier.
 
     Helper function for self._postprocess_rpn.
@@ -975,20 +1065,35 @@ class FasterRCNNMetaArch(model.DetectionModel):
     Returns:
       a BoxList contained sampled proposals.
     """
-    (cls_targets, cls_weights, _, _, _) = self._detector_target_assigner.assign(
+    (cls_targets, cls_weights, trs_targets, _, _, _) = self._detector_target_assigner.assign(
         proposal_boxlist, groundtruth_boxlist,
-        groundtruth_classes_with_background)
+        groundtruth_classes_with_background,
+        groundtruth_transcriptions)
     # Selects all boxes as candidates if none of them is selected according
     # to cls_weights. This could happen as boxes within certain IOU ranges
     # are ignored. If triggered, the selected boxes will still be ignored
     # during loss computation.
+
+    print ''
+    print 'sample box classifier'
+    print cls_targets
+    print cls_weights
+    print trs_targets
+
+    proposal_boxlist.set_field('groundtruth_transcriptions', trs_targets)
     cls_weights += tf.to_float(tf.equal(tf.reduce_sum(cls_weights), 0))
     positive_indicator = tf.greater(tf.argmax(cls_targets, axis=1), 0)
     sampled_indices = self._second_stage_sampler.subsample(
         tf.cast(cls_weights, tf.bool),
         self._second_stage_batch_size,
         positive_indicator)
-    return box_list_ops.boolean_mask(proposal_boxlist, sampled_indices)
+    
+    sampled_proposal_boxlist = box_list_ops.boolean_mask(proposal_boxlist, sampled_indices)
+    print sampled_proposal_boxlist.get_field('groundtruth_transcriptions')
+    sys.stdout.flush()
+
+    return sampled_proposal_boxlist
+
 
   def _compute_second_stage_input_feature_maps(self, features_to_crop,
                                                proposal_boxes_normalized):
@@ -1017,11 +1122,15 @@ class FasterRCNNMetaArch(model.DetectionModel):
           tf.range(start=0, limit=proposals_shape[0]), 1)
       return tf.reshape(ones_mat * multiplier, [-1])
 
+    #proposal_boxes_normalized = tf.Print(proposal_boxes_normalized, [proposal_boxes_normalized], summarize=1000)
+    proposal_boxes_normalized = proposal_boxes_normalized * tf.constant([0.9, 0.9, 1.0, 1.0]) + (1 - proposal_boxes_normalized) * tf.constant([0.0, 0.0, 0.1, 0.1])
+
     cropped_regions = tf.image.crop_and_resize(
         features_to_crop,
         self._flatten_first_two_dimensions(proposal_boxes_normalized),
         get_box_inds(proposal_boxes_normalized),
-        (self._initial_crop_size, self._initial_crop_size))
+        #(self._initial_crop_size, self._initial_crop_size))
+        (3, 9))
     return slim.max_pool2d(
         cropped_regions,
         [self._maxpool_kernel_size, self._maxpool_kernel_size],
@@ -1034,7 +1143,8 @@ class FasterRCNNMetaArch(model.DetectionModel):
                                   num_proposals,
                                   image_shape,
                                   mask_predictions=None,
-                                  mask_threshold=0.5):
+                                  mask_threshold=0.5,
+                                  transcriptions=None):
     """Converts predictions from the second stage box classifier to detections.
 
     Args:
@@ -1092,13 +1202,22 @@ class FasterRCNNMetaArch(model.DetectionModel):
       mask_predictions_batch = tf.reshape(
           mask_predictions, [-1, self.max_num_proposals,
                              self.num_classes, mask_height, mask_width])
+    if transcriptions is not None:
+      transcriptions = tf.reshape(transcriptions, [-1, self.max_num_proposals, 16])
+
+    print ''
+    print '_postprocess_box_classifier'
+    print refined_decoded_boxes_batch
+    print transcriptions
+
     detections = self._second_stage_nms_fn(
         refined_decoded_boxes_batch,
         class_predictions_batch,
         clip_window=clip_window,
         change_coordinate_frame=True,
         num_valid_boxes=num_proposals,
-        masks=mask_predictions_batch)
+        masks=mask_predictions_batch,
+        transcriptions=transcriptions)
     if mask_predictions is not None:
       detections['detection_masks'] = tf.to_float(
           tf.greater_equal(detections['detection_masks'], mask_threshold))
@@ -1171,7 +1290,31 @@ class FasterRCNNMetaArch(model.DetectionModel):
                 prediction_dict['num_proposals'],
                 groundtruth_boxlists,
                 groundtruth_classes_with_background_list))
+
+      if True:
+        loss_dict.update(
+            self._loss_transcription(
+                prediction_dict['transcriptions_logits'],
+                prediction_dict['transcriptions_groundtruth']))
+
     return loss_dict
+
+  def _loss_transcription(self,
+                          transcriptions_logits,
+                          transcriptions_groundtruth):
+
+    weights = tf.ones_like(transcriptions_groundtruth, dtype=tf.float32)
+    weights *= tf.to_float(transcriptions_groundtruth > 0)
+
+    loss = tf.contrib.legacy_seq2seq.sequence_loss(
+        tf.unstack(transcriptions_logits, axis=1),
+        tf.unstack(tf.to_int32(transcriptions_groundtruth), axis=1),
+        tf.unstack(weights, axis=1),
+        softmax_loss_function = lambda labels, logits: tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=labels),
+        average_across_timesteps=False)
+
+    return {'transcriptions_loss': loss}
+
 
   def _loss_rpn(self,
                 rpn_box_encodings,

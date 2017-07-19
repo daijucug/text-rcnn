@@ -23,14 +23,23 @@ import functools
 
 import tensorflow as tf
 
+import sys
+
+import numpy as np
+
+from object_detection import eval_util
 from object_detection.builders import optimizer_builder
 from object_detection.builders import preprocessor_builder
 from object_detection.core import batcher
 from object_detection.core import preprocessor
 from object_detection.core import standard_fields as fields
+from object_detection.core import box_list
+from object_detection.core import box_list_ops
 from object_detection.utils import ops as util_ops
 from object_detection.utils import variables_helper
+from object_detection.utils import metrics
 from deployment import model_deploy
+
 
 slim = tf.contrib.slim
 
@@ -98,16 +107,19 @@ def _get_inputs(input_queue, num_classes):
   label_id_offset = 1
   def extract_images_and_targets(read_data):
     image = read_data[fields.InputDataFields.image]
+    filename = read_data[fields.InputDataFields.filename]
+
     location_gt = read_data[fields.InputDataFields.groundtruth_boxes]
     classes_gt = tf.cast(read_data[fields.InputDataFields.groundtruth_classes],
                          tf.int32)
     classes_gt -= label_id_offset
     classes_gt = util_ops.padded_one_hot_encoding(indices=classes_gt,
                                                   depth=num_classes, left_pad=0)
+    texts_gt = read_data[fields.InputDataFields.groundtruth_texts]
+    texts_gt = tf.reshape(tf.decode_raw(texts_gt, tf.uint8), [-1, 16])
     masks_gt = read_data.get(fields.InputDataFields.groundtruth_instance_masks)
-    return image, location_gt, classes_gt, masks_gt
+    return image, filename, location_gt, classes_gt, texts_gt, masks_gt
   return zip(*map(extract_images_and_targets, read_data_list))
-
 
 def _create_losses(input_queue, create_model_fn):
   """Creates loss function for a DetectionModel.
@@ -117,22 +129,171 @@ def _create_losses(input_queue, create_model_fn):
     create_model_fn: A function to create the DetectionModel.
   """
   detection_model = create_model_fn()
-  (images, groundtruth_boxes_list, groundtruth_classes_list,
+  (original_images, filenames, groundtruth_boxes_list, groundtruth_classes_list, groundtruth_transcriptions_list,
    groundtruth_masks_list
   ) = _get_inputs(input_queue, detection_model.num_classes)
-  images = [detection_model.preprocess(image) for image in images]
+
+  images = [detection_model.preprocess(image) for image in original_images]
   images = tf.concat(images, 0)
   if any(mask is None for mask in groundtruth_masks_list):
     groundtruth_masks_list = None
 
+  tf.summary.image('InputImage', images, max_outputs=99999)
+
+  print ''
+  print '_create_losses'
+  print original_images
+  print images
+  print groundtruth_boxes_list
+  print groundtruth_classes_list
+  print groundtruth_transcriptions_list
+  sys.stdout.flush()
+
   detection_model.provide_groundtruth(groundtruth_boxes_list,
                                       groundtruth_classes_list,
-                                      groundtruth_masks_list)
+                                      groundtruth_masks_list,
+                                      groundtruth_transcriptions_list = groundtruth_transcriptions_list)
   prediction_dict = detection_model.predict(images)
-
   losses_dict = detection_model.loss(prediction_dict)
-  for loss_tensor in losses_dict.values():
+  for name, loss_tensor in losses_dict.iteritems():
+    tf.summary.scalar(name, loss_tensor)
     tf.losses.add_loss(loss_tensor)
+  print losses_dict
+  sys.stdout.flush()
+
+  # Metrics for sequence accuracy
+  if prediction_dict['transcriptions'] is not None:
+    tf.summary.scalar('CharAccuracy', metrics.char_accuracy(prediction_dict['transcriptions'], prediction_dict['transcriptions_groundtruth']))
+    tf.summary.scalar('SequenceAccuracy', metrics.sequence_accuracy(prediction_dict['transcriptions'], prediction_dict['transcriptions_groundtruth']))
+
+  return 
+
+  # All the rest is for debugging and testing during training purpose. 
+
+  # Metrics for detection
+  detections = detection_model.postprocess(prediction_dict)
+
+  original_images = original_images[0]
+  filenames = filenames[0]
+
+  original_image_shape = tf.shape(original_images)
+  absolute_detection_boxlist = box_list_ops.to_absolute_coordinates(
+      box_list.BoxList(tf.squeeze(detections['detection_boxes'], axis=0)),
+      original_image_shape[1], original_image_shape[2])
+  label_id_offset = 1
+  det_boxes = absolute_detection_boxlist.get()
+
+  det_scores = tf.squeeze(detections['detection_scores'], axis=0)
+  det_classes = tf.ones_like(det_scores)
+  det_transcriptions = tf.squeeze(detections['detection_transcriptions'], axis=0)
+
+  print ''
+  print 'Metrics printing'
+  print groundtruth_boxes_list
+  print groundtruth_classes_list
+  print groundtruth_transcriptions_list
+
+  normalized_gt_boxlist = box_list.BoxList(groundtruth_boxes_list[0])
+  gt_boxlist = box_list_ops.scale(normalized_gt_boxlist, original_image_shape[1], original_image_shape[2])
+  gt_boxes = gt_boxlist.get()
+  gt_classes = groundtruth_classes_list[0]
+  gt_transcriptions = groundtruth_transcriptions_list[0]
+
+  print original_images
+  print filenames
+  print det_boxes
+  print det_scores 
+  print det_classes 
+  print det_transcriptions
+  print gt_boxes
+  print gt_classes
+  print gt_transcriptions
+  #images = tf.Print(images, [groundtruth_boxes_list[0], xx, tf.shape(original_images[0])], message='groundtruthboxes', summarize=10000)
+  sys.stdout.flush()
+
+  mAP = tf.py_func(eval_wrapper, [original_images, filenames, det_boxes, det_scores, det_classes, det_transcriptions, gt_boxes, gt_classes, gt_transcriptions, tf.train.get_global_step()], tf.float64, stateful=False)
+  tf.summary.scalar('mAP', mAP)
+
+
+def eval_wrapper(original_image, filename, det_boxes, det_scores, det_classes, det_transcriptions, gt_boxes, gt_classes, gt_transcriptions, global_step):
+
+  original_image = original_image
+
+  tensor_dict = {}
+  tensor_dict['original_image'] = original_image
+  tensor_dict['filename'] = filename
+  tensor_dict['detection_boxes'] = det_boxes
+  tensor_dict['detection_scores'] = det_scores
+  tensor_dict['detection_classes'] = det_classes
+  tensor_dict['detection_transcriptions'] = det_transcriptions
+  tensor_dict['groundtruth_boxes'] = gt_boxes
+  tensor_dict['groundtruth_classes'] = gt_classes
+  tensor_dict['groundtruth_transcriptions'] = gt_transcriptions
+  tensor_dict['image_id'] = 'aaa'
+
+  print gt_transcriptions
+  gt_transcriptions_str = []
+  for a in gt_transcriptions:
+    gt_transcriptions_str += ["".join([chr(item) for item in a if item > 0])]
+  print gt_transcriptions_str
+
+  print det_transcriptions
+  det_transcriptions_str = []
+  for a in det_transcriptions:
+    det_transcriptions_str += ["".join([chr(item) for item in a if item > 0])]
+  print det_transcriptions_str
+
+  print ''
+  print 'eval wrapper'
+  print filename
+  print original_image.shape
+  print det_boxes.shape
+  print det_scores.shape
+  print det_classes.shape
+  print det_transcriptions.shape
+  print gt_boxes.shape
+  print gt_classes.shape
+  print gt_transcriptions.shape
+  print global_step
+  sys.stdout.flush()
+
+  categories = [{'id': 0, 'name': 'background'}, {'id': 1, 'name': 'text'}]
+  
+  eval_util.visualize_detection_results(tensor_dict, 'tag' + str(global_step), 
+    global_step, 
+    categories = categories, 
+    summary_dir = '/home/zbychuj/Desktop/models/object_detection/models/eval',
+    export_dir = '/home/zbychuj/Desktop/models/object_detection/models/eval',
+    show_groundtruth = True,
+    max_num_predictions = 100000,
+    min_score_thresh=.5,
+    gt_transcriptions = gt_transcriptions_str,
+    det_transcriptions = det_transcriptions_str)
+
+  #f = open('/home/zbychuj/Desktop/test_results/' + filename + '.txt', 'w')
+  #for i in range(0, 64):
+  #  f.write(str(det_scores[i]) + ',' + str(det_boxes[i][0]) + ',' + str(det_boxes[i][1]) + ',' + str(det_boxes[i][2]) + ',' + str(det_boxes[i][3]) + ',')
+  #  f.write(str(det_transcriptions[i]) + '\n')
+  #f.close()
+  
+  tensor_dict = {}
+  tensor_dict['detection_boxes'] = [det_boxes]
+  tensor_dict['detection_scores'] = [det_scores]
+  tensor_dict['detection_classes'] = [det_classes]
+  tensor_dict['groundtruth_boxes'] = [gt_boxes]
+  tensor_dict['groundtruth_classes'] = [gt_classes]
+  tensor_dict['image_id'] = ['aaa']
+  #metrics = eval_util.evaluate_detection_results_pascal_voc(tensor_dict, categories, label_id_offset=1)
+  #mAP = metrics['Precision/mAP@0.5IOU']
+  #print mAP
+
+  print 'dupadupa'
+  print 'dupadupa'
+  print 'dupadupa'
+  print 'dupadupa'
+  sys.stdout.flush()
+
+  return float(global_step)
 
 
 def train(create_tensor_dict_fn, create_model_fn, train_config, master, task,
@@ -251,8 +412,8 @@ def train(create_tensor_dict_fn, create_model_fn, train_config, master, task,
     # Add summaries.
     for model_var in slim.get_model_variables():
       global_summaries.add(tf.summary.histogram(model_var.op.name, model_var))
-    for loss_tensor in tf.losses.get_losses():
-      global_summaries.add(tf.summary.scalar(loss_tensor.op.name, loss_tensor))
+    for var in tf.all_variables():
+      global_summaries.add(tf.summary.histogram(var.op.name, var))
     global_summaries.add(
         tf.summary.scalar('TotalLoss', tf.losses.get_total_loss()))
 

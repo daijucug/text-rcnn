@@ -54,7 +54,7 @@ class BoxList(object):
       raise ValueError('Invalid dimensions for box data.')
     if boxes.dtype != tf.float32:
       raise ValueError('Invalid tensor type: should be tf.float32')
-    self.data = {'boxes': boxes}
+    self.data = {'boxes': boxes, 'groundtruth_transcriptions': tf.tile(tf.slice(tf.zeros_like(boxes), [0,0], [-1,1]), [1,16]) }
 
   def num_boxes(self):
     """Returns number of boxes held in collection.

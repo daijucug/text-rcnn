@@ -29,6 +29,7 @@ from object_detection.utils import visualization_utils as vis_utils
 
 slim = tf.contrib.slim
 
+import sys
 
 def write_metrics(metrics, global_step, summary_dir):
   """Write metrics to a summary directory.
@@ -131,14 +132,33 @@ def evaluate_detection_results_pascal_voc(result_lists,
     difficult = None
     if difficult_lists is not None and difficult_lists[idx].size:
       difficult = difficult_lists[idx].astype(np.bool)
+  
+    print ''
+    print 'eval utils 1'
+    sys.stdout.flush()
+
     evaluator.add_single_ground_truth_image_info(
         image_id, result_lists['groundtruth_boxes'][idx],
         result_lists['groundtruth_classes'][idx] - label_id_offset,
         difficult)
+    print ''
+    print 'eval utils 2'
+    print idx
+    print result_lists
+    print image_id
+    print result_lists['detection_boxes'][idx]
+    print result_lists['detection_scores'][idx]
+    print result_lists['detection_classes'][idx]
+    print label_id_offset
+
+    sys.stdout.flush()
     evaluator.add_single_detected_image_info(
         image_id, result_lists['detection_boxes'][idx],
         result_lists['detection_scores'][idx],
         result_lists['detection_classes'][idx] - label_id_offset)
+    print ''
+    print 'eval utils 3'
+    sys.stdout.flush()
   per_class_ap, mean_ap, _, _, per_class_corloc, mean_corloc = (
       evaluator.evaluate())
 
@@ -171,7 +191,9 @@ def visualize_detection_results(result_dict,
                                 agnostic_mode=False,
                                 show_groundtruth=False,
                                 min_score_thresh=.5,
-                                max_num_predictions=20):
+                                max_num_predictions=20,
+                                gt_transcriptions=None,
+                                det_transcriptions=None):
   """Visualizes detection results and writes visualizations to image summaries.
 
   This function visualizes an image with its detected bounding boxes and writes
@@ -246,7 +268,10 @@ def visualize_detection_results(result_dict,
         category_index,
         keypoints=groundtruth_keypoints,
         use_normalized_coordinates=False,
-        max_boxes_to_draw=None)
+        max_boxes_to_draw=None,
+        gt_transcriptions=gt_transcriptions)
+    export_path = os.path.join(export_dir, 'export-{}-gt.png'.format(tag))
+    vis_utils.save_image_array_as_png(image, export_path)
   vis_utils.visualize_boxes_and_labels_on_image_array(
       image,
       detection_boxes,
@@ -258,7 +283,8 @@ def visualize_detection_results(result_dict,
       use_normalized_coordinates=False,
       max_boxes_to_draw=max_num_predictions,
       min_score_thresh=min_score_thresh,
-      agnostic_mode=agnostic_mode)
+      agnostic_mode=agnostic_mode,
+      gt_transcriptions=det_transcriptions)
 
   if export_dir:
     export_path = os.path.join(export_dir, 'export-{}.png'.format(tag))

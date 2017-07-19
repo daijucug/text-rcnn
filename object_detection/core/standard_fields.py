@@ -60,6 +60,7 @@ class InputDataFields(object):
   groundtruth_image_classes = 'groundtruth_image_classes'
   groundtruth_boxes = 'groundtruth_boxes'
   groundtruth_classes = 'groundtruth_classes'
+  groundtruth_texts = 'groundtruth_texts'
   groundtruth_label_types = 'groundtruth_label_types'
   groundtruth_is_crowd = 'groundtruth_is_crowd'
   groundtruth_area = 'groundtruth_area'
@@ -94,6 +95,7 @@ class BoxListFields(object):
   masks = 'masks'
   keypoints = 'keypoints'
   keypoint_heatmaps = 'keypoint_heatmaps'
+  transcriptions = 'transcriptions'
 
 
 class TfExampleFields(object):

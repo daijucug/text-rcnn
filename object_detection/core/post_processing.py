@@ -21,6 +21,7 @@ from object_detection.core import box_list
 from object_detection.core import box_list_ops
 from object_detection.core import standard_fields as fields
 
+import sys
 
 def multiclass_non_max_suppression(boxes,
                                    scores,
@@ -31,6 +32,7 @@ def multiclass_non_max_suppression(boxes,
                                    clip_window=None,
                                    change_coordinate_frame=False,
                                    masks=None,
+                                   transcriptions=None,
                                    additional_fields=None,
                                    scope=None):
   """Multi-class version of non maximum suppression.
@@ -102,6 +104,11 @@ def multiclass_non_max_suppression(boxes,
     raise ValueError('if change_coordinate_frame is True, then a clip_window'
                      'must be specified.')
 
+  print ''
+  print 'multiclass_non_max_suppression'
+  print boxes
+  print transcriptions
+
   with tf.name_scope(scope, 'MultiClassNonMaxSuppression'):
     num_boxes = tf.shape(boxes)[0]
     num_scores = tf.shape(scores)[0]
@@ -130,6 +137,9 @@ def multiclass_non_max_suppression(boxes,
         per_class_masks = per_class_masks_list[boxes_idx]
         boxlist_and_class_scores.add_field(fields.BoxListFields.masks,
                                            per_class_masks)
+      if transcriptions is not None:
+        boxlist_and_class_scores.add_field(fields.BoxListFields.transcriptions,
+                                           transcriptions)
       if additional_fields is not None:
         for key, tensor in additional_fields.items():
           boxlist_and_class_scores.add_field(key, tensor)
@@ -174,6 +184,7 @@ def batch_multiclass_non_max_suppression(boxes,
                                          change_coordinate_frame=False,
                                          num_valid_boxes=None,
                                          masks=None,
+                                         transcriptions=None,
                                          scope=None):
   """Multi-class version of non maximum suppression that operates on a batch.
 
@@ -240,19 +251,23 @@ def batch_multiclass_non_max_suppression(boxes,
     per_image_scores_list = tf.unstack(scores)
     num_valid_boxes_list = len(per_image_boxes_list) * [None]
     per_image_masks_list = len(per_image_boxes_list) * [None]
+    per_image_transcriptions_list = len(per_image_boxes_list) * [None]
     if num_valid_boxes is not None:
       num_valid_boxes_list = tf.unstack(num_valid_boxes)
     if masks is not None:
       per_image_masks_list = tf.unstack(masks)
+    if transcriptions is not None:
+      per_image_transcriptions_list = tf.unstack(transcriptions)
 
     detection_boxes_list = []
     detection_scores_list = []
     detection_classes_list = []
     num_detections_list = []
     detection_masks_list = []
-    for (per_image_boxes, per_image_scores, per_image_masks, num_valid_boxes
+    detection_transcriptions_list = []
+    for (per_image_boxes, per_image_scores, per_image_masks, per_image_transcriptions, num_valid_boxes
         ) in zip(per_image_boxes_list, per_image_scores_list,
-                 per_image_masks_list, num_valid_boxes_list):
+                 per_image_masks_list, per_image_transcriptions_list, num_valid_boxes_list):
       if num_valid_boxes is not None:
         per_image_boxes = tf.reshape(
             tf.slice(per_image_boxes, 3*[0],
@@ -265,6 +280,12 @@ def batch_multiclass_non_max_suppression(boxes,
               tf.slice(per_image_masks, 4*[0],
                        tf.stack([num_valid_boxes, -1, -1, -1])),
               [-1, q, masks.shape[3].value, masks.shape[4].value])
+        if transcriptions is not None:
+          per_image_transcriptions = tf.reshape(
+              tf.slice(per_image_transcriptions, [0, 0],
+                       tf.stack([num_valid_boxes, -1])),
+              [-1, 16])
+
       nmsed_boxlist = multiclass_non_max_suppression(
           per_image_boxes,
           per_image_scores,
@@ -273,6 +294,7 @@ def batch_multiclass_non_max_suppression(boxes,
           max_size_per_class,
           max_total_size,
           masks=per_image_masks,
+          transcriptions=per_image_transcriptions,
           clip_window=clip_window,
           change_coordinate_frame=change_coordinate_frame)
       num_detections_list.append(tf.to_float(nmsed_boxlist.num_boxes()))
@@ -286,6 +308,10 @@ def batch_multiclass_non_max_suppression(boxes,
       if masks is not None:
         detection_masks_list.append(
             padded_boxlist.get_field(fields.BoxListFields.masks))
+      if transcriptions is not None:
+        detection_transcriptions_list.append(
+            padded_boxlist.get_field(fields.BoxListFields.transcriptions))
+
 
     nms_dict = {
         'detection_boxes': tf.stack(detection_boxes_list),
@@ -295,4 +321,6 @@ def batch_multiclass_non_max_suppression(boxes,
     }
     if masks is not None:
       nms_dict['detection_masks'] = tf.stack(detection_masks_list)
+    if transcriptions is not None:
+      nms_dict['detection_transcriptions'] = tf.stack(detection_transcriptions_list)
     return nms_dict

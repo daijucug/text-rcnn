@@ -331,7 +331,8 @@ def visualize_boxes_and_labels_on_image_array(image,
                                               max_boxes_to_draw=20,
                                               min_score_thresh=.5,
                                               agnostic_mode=False,
-                                              line_thickness=4):
+                                              line_thickness=4,
+                                              gt_transcriptions=None):
   """Overlay labeled boxes on an image with formatted scores and label names.
 
   This function groups boxes that correspond to the same location
@@ -378,11 +379,14 @@ def visualize_boxes_and_labels_on_image_array(image,
       if keypoints is not None:
         box_to_keypoints_map[box].extend(keypoints[i])
       if scores is None:
-        box_to_color_map[box] = 'black'
+        box_to_color_map[box] = 'orange'
+        if gt_transcriptions is not None:
+          box_to_display_str_map[box].append(str(gt_transcriptions[i]))
       else:
         if not agnostic_mode:
           if classes[i] in category_index.keys():
             class_name = category_index[classes[i]]['name']
+            class_name = str(gt_transcriptions[i])
           else:
             class_name = 'N/A'
           display_str = '{}: {}%'.format(

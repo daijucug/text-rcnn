@@ -19,6 +19,8 @@ from __future__ import division
 import numpy as np
 from six import moves
 
+import tensorflow as tf
+
 
 def compute_precision_recall(scores, labels, num_gt):
   """Compute precision and recall.
@@ -143,3 +145,35 @@ def compute_cor_loc(num_gt_imgs_per_class,
       num_gt_imgs_per_class == 0,
       np.nan,
       num_images_correctly_detected_per_class / num_gt_imgs_per_class)
+
+
+def char_accuracy(predictions, targets, ignore_char = 0):
+  with tf.variable_scope('CharAccuracy'):
+    predictions.get_shape().assert_is_compatible_with(targets.get_shape())
+
+    targets = tf.to_int32(targets)
+    predictions = tf.to_int32(predictions)
+    weights = tf.to_float(tf.not_equal(targets, ignore_char))
+
+    correct_chars = tf.to_float(tf.equal(predictions, targets))
+    correct_chars_sum = tf.reduce_sum(tf.multiply(correct_chars, weights))
+    num_chars_sum = tf.reduce_sum(weights)
+
+    return tf.where(tf.reduce_sum(weights) < 1, -1.0, tf.div(correct_chars_sum, num_chars_sum))
+
+
+def sequence_accuracy(predictions, targets, ignore_char = 0):
+  with tf.variable_scope('SequenceAccuracy'):
+    predictions.get_shape().assert_is_compatible_with(targets.get_shape())
+
+    targets = tf.to_int32(targets)
+    predictions = tf.to_int32(predictions)
+    weights = tf.not_equal(targets, ignore_char)
+
+    correct_chars = tf.logical_or(tf.equal(predictions, targets), tf.logical_not(weights))
+    correct_seq = tf.to_float(tf.reduce_all(correct_chars, 1))
+    weights_seq = tf.to_float(tf.reduce_any(weights, 1))
+    correct_seq_sum = tf.reduce_sum(tf.multiply(correct_seq, weights_seq))
+    num_seq_sum = tf.reduce_sum(weights_seq)
+
+    return tf.where(tf.reduce_sum(weights_seq) < 1, -1.0, tf.div(correct_seq_sum, num_seq_sum))

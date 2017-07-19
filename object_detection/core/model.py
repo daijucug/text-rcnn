@@ -195,7 +195,8 @@ class DetectionModel(object):
                           groundtruth_boxes_list,
                           groundtruth_classes_list,
                           groundtruth_masks_list=None,
-                          groundtruth_keypoints_list=None):
+                          groundtruth_keypoints_list=None,
+                          groundtruth_transcriptions_list=None):
     """Provide groundtruth tensors.
 
     Args:
@@ -226,6 +227,9 @@ class DetectionModel(object):
     if groundtruth_keypoints_list:
       self._groundtruth_lists[
           fields.BoxListFields.keypoints] = groundtruth_keypoints_list
+    if groundtruth_transcriptions_list:
+      self._groundtruth_lists[
+          fields.BoxListFields.transcriptions] = groundtruth_transcriptions_list
 
   @abstractmethod
   def restore_fn(self, checkpoint_path, from_detection_checkpoint=True):
